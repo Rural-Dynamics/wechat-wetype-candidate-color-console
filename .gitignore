@@ -1,0 +1,18 @@
+# Local runtime state (contains PID and memory addresses)
+WeTypeSkin.ini
+
+# Build and release outputs
+build/
+dist/
+*.exe
+*.o
+*.obj
+*.zip
+
+# Editor and OS files
+.vs/
+.vscode/
+*.user
+Thumbs.db
+Desktop.ini
+
