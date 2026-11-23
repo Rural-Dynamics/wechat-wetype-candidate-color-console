@@ -57,6 +57,7 @@ static const std::vector<ColorPreset> kDarkPresets = {
 };
 
 static const std::vector<ColorPreset> kLightPresets = {
+    {L"候选粉", RGB(0xFF, 0xD0, 0xE8)},
     {L"深空灰", RGB(0x3A, 0x3A, 0x3A)},
     {L"经典蓝", RGB(0x25, 0x63, 0xEB)},
     {L"微信绿", RGB(0x00, 0xA8, 0x6F)},
@@ -70,6 +71,7 @@ static const COLORREF kPaletteColors[] = {
     RGB(0x02, 0x84, 0xC7), RGB(0x25, 0x63, 0xEB), RGB(0x4F, 0x46, 0xE5), RGB(0x7C, 0x3A, 0xED), RGB(0xC0, 0x26, 0xD3), RGB(0xDB, 0x27, 0x77),
     RGB(0xFB, 0x71, 0x85), RGB(0xFB, 0x92, 0x3C), RGB(0xFA, 0xCC, 0x15), RGB(0x84, 0xCC, 0x16), RGB(0x10, 0xB9, 0x81), RGB(0x06, 0xB6, 0xD4)
 };
+
 
 static std::wstring g_baseDir;
 static std::wstring g_iniPath;
@@ -85,7 +87,7 @@ static HWND g_paletteWindow = nullptr;
 static HWND g_paletteApplyButton = nullptr;
 static HWND g_paletteCancelButton = nullptr;
 static constexpr COLORREF kDefaultDarkColor = RGB(0xD4, 0xD4, 0xD4);
-static constexpr COLORREF kDefaultLightColor = RGB(0x3A, 0x3A, 0x3A);
+static constexpr COLORREF kDefaultLightColor = RGB(0xFF, 0xD0, 0xE8);
 static COLORREF g_darkColor = kDefaultDarkColor;
 static COLORREF g_lightColor = kDefaultLightColor;
 static HFONT g_fontTitle = nullptr;
@@ -137,8 +139,10 @@ enum class LucideIcon { Moon, Sun, Palette, RotateCcw, Power, Check };
 struct Config {
     uint64_t darkTarget;
     uint64_t lightTarget;
+    uint64_t foregroundTarget;
     std::vector<uint64_t> darkSources;
     std::vector<uint64_t> lightSources;
+    std::vector<uint64_t> foregroundSources;
     DWORD maxMatches;
     DWORD pollMs;
 };
@@ -148,6 +152,7 @@ struct PatchState {
     uint64_t created = 0;
     std::vector<uintptr_t> darkAddresses;
     std::vector<uintptr_t> lightAddresses;
+    std::vector<uintptr_t> foregroundAddresses;
 };
 
 static std::wstring GetExeDirectory() {
@@ -210,9 +215,11 @@ static std::vector<uint64_t> ParseColorList(const std::wstring& text) {
 static Config LoadConfig() {
     Config config;
     config.darkTarget = ParseRgb(ReadIni(L"targets", L"dark", L"D4D4D4"));
-    config.lightTarget = ParseRgb(ReadIni(L"targets", L"light", L"3A3A3A"));
+    config.lightTarget = ParseRgb(ReadIni(L"targets", L"light", L"FFD0E8"));
+    config.foregroundTarget = ParseRgb(ReadIni(L"targets", L"foreground", L"FFFFFF"));
     config.darkSources = ParseColorList(ReadIni(L"signatures", L"dark", L"00A86F"));
     config.lightSources = ParseColorList(ReadIni(L"signatures", L"light", L"00B176"));
+    config.foregroundSources = ParseColorList(ReadIni(L"signatures", L"foreground", L"383838,191919,F7F7F7"));
     config.maxMatches = GetPrivateProfileIntW(L"signatures", L"max_matches", 8, g_iniPath.c_str());
     config.pollMs = GetPrivateProfileIntW(L"engine", L"poll_ms", 1500, g_iniPath.c_str());
     config.maxMatches = std::max<DWORD>(1, std::min<DWORD>(config.maxMatches, 32));
@@ -294,6 +301,7 @@ static PatchState LoadState() {
     state.created = wcstoull(ReadIni(L"state", L"created", L"0").c_str(), nullptr, 16);
     state.darkAddresses = ParseAddresses(ReadIni(L"state", L"dark_addresses", L""));
     state.lightAddresses = ParseAddresses(ReadIni(L"state", L"light_addresses", L""));
+    state.foregroundAddresses = ParseAddresses(ReadIni(L"state", L"foreground_addresses", L""));
     return state;
 }
 
@@ -304,6 +312,7 @@ static void SaveState(const PatchState& state) {
     WriteIni(L"state", L"created", created.str());
     WriteIni(L"state", L"dark_addresses", JoinAddresses(state.darkAddresses));
     WriteIni(L"state", L"light_addresses", JoinAddresses(state.lightAddresses));
+    WriteIni(L"state", L"foreground_addresses", JoinAddresses(state.foregroundAddresses));
 }
 
 static bool IsReadableWritable(const MEMORY_BASIC_INFORMATION& info) {
@@ -337,15 +346,17 @@ static bool PatchKnownAddresses(
     const Config& config,
     PatchState& state
 ) {
-    if (state.darkAddresses.empty() || state.lightAddresses.empty()) return false;
+    if (state.darkAddresses.empty() || state.lightAddresses.empty() || state.foregroundAddresses.empty()) return false;
     for (uintptr_t address : state.darkAddresses) if (!WriteValue(process, address, config.darkTarget)) return false;
     for (uintptr_t address : state.lightAddresses) if (!WriteValue(process, address, config.lightTarget)) return false;
+    for (uintptr_t address : state.foregroundAddresses) if (!WriteValue(process, address, config.foregroundTarget)) return false;
     return true;
 }
 
 static bool ScanAndPatch(HANDLE process, const Config& config, PatchState& state) {
     std::vector<uintptr_t> dark;
     std::vector<uintptr_t> light;
+    std::vector<uintptr_t> foreground;
     std::vector<uintptr_t> darkTargets;
     std::vector<uintptr_t> lightTargets;
     const std::vector<uint64_t> darkTargetPattern{config.darkTarget};
@@ -361,6 +372,7 @@ static bool ScanAndPatch(HANDLE process, const Config& config, PatchState& state
             if (ReadProcessMemory(process, info.BaseAddress, buffer.data(), size, &read)) {
                 CollectMatches(buffer.data(), read, base, config.darkSources, dark);
                 CollectMatches(buffer.data(), read, base, config.lightSources, light);
+                CollectMatches(buffer.data(), read, base, config.foregroundSources, foreground);
                 CollectMatches(buffer.data(), read, base, darkTargetPattern, darkTargets);
                 CollectMatches(buffer.data(), read, base, lightTargetPattern, lightTargets);
             }
@@ -373,6 +385,8 @@ static bool ScanAndPatch(HANDLE process, const Config& config, PatchState& state
     dark.erase(std::unique(dark.begin(), dark.end()), dark.end());
     std::sort(light.begin(), light.end());
     light.erase(std::unique(light.begin(), light.end()), light.end());
+    std::sort(foreground.begin(), foreground.end());
+    foreground.erase(std::unique(foreground.begin(), foreground.end()), foreground.end());
 
     bool usedTargetFallback = dark.empty() || light.empty();
     if (usedTargetFallback) {
@@ -399,18 +413,21 @@ static bool ScanAndPatch(HANDLE process, const Config& config, PatchState& state
 
     WriteIni(L"status", L"dark_matches", std::to_wstring(dark.size()));
     WriteIni(L"status", L"light_matches", std::to_wstring(light.size()));
-    if (dark.empty() || light.empty()) {
+    WriteIni(L"status", L"foreground_matches", std::to_wstring(foreground.size()));
+    if (dark.empty() || light.empty() || foreground.empty()) {
         WriteIni(L"status", L"result", L"no_compatible_signature");
         return false;
     }
-    if (dark.size() > config.maxMatches || light.size() > config.maxMatches) {
+    if (dark.size() > config.maxMatches || light.size() > config.maxMatches || foreground.size() > config.maxMatches) {
         WriteIni(L"status", L"result", L"ambiguous_signature");
         return false;
     }
     for (uintptr_t item : dark) if (!WriteValue(process, item, config.darkTarget)) return false;
     for (uintptr_t item : light) if (!WriteValue(process, item, config.lightTarget)) return false;
+    for (uintptr_t item : foreground) if (!WriteValue(process, item, config.foregroundTarget)) return false;
     state.darkAddresses = dark;
     state.lightAddresses = light;
+    state.foregroundAddresses = foreground;
     WriteIni(L"status", L"result", usedTargetFallback ? L"already_patched" : L"patched");
     return true;
 }
@@ -445,6 +462,7 @@ static bool PatchRenderer(DWORD pid, Config& config, PatchState& state, bool pre
         state.created = created;
         state.darkAddresses.clear();
         state.lightAddresses.clear();
+        state.foregroundAddresses.clear();
         success = ScanAndPatch(process, config, state);
     }
     if (success) {
@@ -1305,7 +1323,7 @@ static LRESULT CALLBACK ModernWindowProc(HWND window, UINT message, WPARAM wPara
             g_editBrush = CreateSolidBrush(ModernTheme::CardBg);
 
             g_darkEdit = CreateWindowExW(0, L"EDIT", L"#D4D4D4", WS_CHILD | WS_VISIBLE | ES_CENTER | ES_UPPERCASE, 0, 0, 0, 0, window, reinterpret_cast<HMENU>(ID_DARK_EDIT), GetModuleHandleW(nullptr), nullptr);
-            g_lightEdit = CreateWindowExW(0, L"EDIT", L"#3A3A3A", WS_CHILD | WS_VISIBLE | ES_CENTER | ES_UPPERCASE, 0, 0, 0, 0, window, reinterpret_cast<HMENU>(ID_LIGHT_EDIT), GetModuleHandleW(nullptr), nullptr);
+            g_lightEdit = CreateWindowExW(0, L"EDIT", L"#FFD0E8", WS_CHILD | WS_VISIBLE | ES_CENTER | ES_UPPERCASE, 0, 0, 0, 0, window, reinterpret_cast<HMENU>(ID_LIGHT_EDIT), GetModuleHandleW(nullptr), nullptr);
             g_darkPaletteButton = CreateWindowExW(0, L"BUTTON", L"打开色板", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, window, reinterpret_cast<HMENU>(ID_DARK_PALETTE), GetModuleHandleW(nullptr), nullptr);
             g_lightPaletteButton = CreateWindowExW(0, L"BUTTON", L"打开色板", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, window, reinterpret_cast<HMENU>(ID_LIGHT_PALETTE), GetModuleHandleW(nullptr), nullptr);
             g_resetButton = CreateWindowExW(0, L"BUTTON", L"恢复默认", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, window, reinterpret_cast<HMENU>(ID_BTN_RESET), GetModuleHandleW(nullptr), nullptr);
