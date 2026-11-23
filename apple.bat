@@ -1,0 +1,1 @@
+.\build\WeTypeSkinLauncher.exe --patch-once
